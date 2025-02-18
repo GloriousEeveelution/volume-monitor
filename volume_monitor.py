@@ -52,7 +52,7 @@ def save_safe_volumes(safe_volumes, force=False):
             last_saved_volumes = safe_volumes.copy()
             logging.info("Saved safe volumes to file.")
 
-    #Fetches all currently running applications with audio sessions.
+# Fetches all currently running applications with audio sessions.
 def get_application_volumes():
     sessions = AudioUtilities.GetAllSessions()
     app_volumes = {}
@@ -69,11 +69,11 @@ def monitor_and_set_volumes():
 
         for app_name, volume_ctl in app_volumes.items():
             current_volume = volume_ctl.GetMasterVolume()
+            session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
 
             if app_name not in safe_volumes:
                 safe_volumes[app_name] = min(current_volume, DEFAULT_THRESHOLD)
                 logging.info(f"New app detected: {app_name}. Set safe volume to {safe_volumes[app_name] * 100:.1f}%.")
-                session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
                 if session:
                     session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
                 volumes_changed = True
@@ -88,17 +88,18 @@ def monitor_and_set_volumes():
                     if reset_attempts[app_name] == 3:
                         logging.warning(f"{app_name} is persistently resetting volume! Forcing override.")
                         time.sleep(0.2)
-                        session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
                     elif reset_attempts[app_name] > 3:
                         force_mute(app_name, session)
                     else:
                         logging.info(f"Detected abrupt reset for {app_name} to {current_volume * 100:.0f}% Setting volume back to {safe_volumes[app_name] * 100:.1f}%. (attempt {reset_attempts[app_name]}/3)")
-                        session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
                         if session:
-                            threading.Timer(0.1, lambda: None).start()
+                            threading.Timer(0.1, lambda: 0).start()  
                             session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
                         
                 else:
+                    if app_name in muted_apps:
+                        muted_apps.remove(app_name)
+                        update_icon()
                     logging.info(
                             f"User adjusted {app_name} volume to {current_volume * 100:.1f}%. Allowing user preference."
                         )
@@ -110,12 +111,12 @@ def monitor_and_set_volumes():
 
         time.sleep(0.2)
 
-
 def force_mute(app_name, session):
     logging.warning(f"{app_name} is persistently resetting volume! Muting application.")
     time.sleep(0.2)
+    session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(0, None)
+    time.sleep(0.2)
     session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMute(True, None)
-    
     muted_apps.add(app_name)
     update_icon()
 
@@ -123,13 +124,8 @@ def force_mute(app_name, session):
 
 
 def create_image(muted=False):
-    base_image = Image.open("F:/progg/resources/animal.png").convert("RGBA")
-
-    if muted:
-        overlay = Image.new("RGBA", base_image.size, (255, 0, 0, 128))
-        return Image.alpha_composite(base_image, overlay)
-    
-    return base_image
+    image_path = os.path.join(SCRIPT_DIR, "cat_notification.png" if muted else "cat.png")
+    return Image.open(image_path).convert("RGBA")
 
 def on_quit(icon, item):
     icon.stop()
@@ -146,7 +142,9 @@ def run_tray_icon():
     icon.run()
 
 def update_icon():
-    icon.icon = create_image(muted=bool(muted_apps))
+    new_icon = create_image(muted=bool(muted_apps))
+    icon.icon = new_icon  
+    icon.update_menu()  
     if muted_apps:
         icon.title = f"Muted: {', '.join(muted_apps)}"
     else:
