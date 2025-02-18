@@ -1,0 +1,4 @@
+pycaw
+pystray
+Pillow
+win10toast

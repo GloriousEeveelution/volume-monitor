@@ -7,6 +7,7 @@ from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 from pystray import Icon, MenuItem, Menu
 from PIL import Image
 import threading
+import win10toast
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,11 +33,18 @@ def load_safe_volumes():
         with open(SAFE_VOLUMES_FILE, "r") as file:
             logging.info("Loaded safe volumes from file.")
             return json.load(file)
-    logging.info("No safe volumes file found. Starting fresh.")
+    logging.info("No safe volumes file found. Creating file.")
     return {}
 
+global last_saved_volumes
+safe_volumes = load_safe_volumes()
+last_saved_volumes = safe_volumes.copy()
+reset_attempts = {}
+muted_apps = set()
+toaster = win10toast.ToastNotifier()
+
+#Saves the safe volumes to the JSON file if changes were made or forced.
 def save_safe_volumes(safe_volumes, force=False):
-    #Saves the safe volumes to the JSON file if changes were made or forced.
     global last_saved_volumes
     if force or safe_volumes != last_saved_volumes:
         with open(SAFE_VOLUMES_FILE, "w") as file:
@@ -44,8 +52,8 @@ def save_safe_volumes(safe_volumes, force=False):
             last_saved_volumes = safe_volumes.copy()
             logging.info("Saved safe volumes to file.")
 
-def get_application_volumes():
     #Fetches all currently running applications with audio sessions.
+def get_application_volumes():
     sessions = AudioUtilities.GetAllSessions()
     app_volumes = {}
     for session in sessions:
@@ -55,10 +63,6 @@ def get_application_volumes():
     return app_volumes
 
 def monitor_and_set_volumes():
-    global last_saved_volumes
-    safe_volumes = load_safe_volumes()
-    last_saved_volumes = safe_volumes.copy()
-
     while True:
         app_volumes = get_application_volumes()
         volumes_changed = False
@@ -74,13 +78,25 @@ def monitor_and_set_volumes():
                     session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
                 volumes_changed = True
             
-            # If the user manually sets the volume higher, stop enforcing the safe level
             elif current_volume != safe_volumes[app_name]:
+            # If the user manually sets the volume higher, stop enforcing the safe level
                 if current_volume - last_saved_volumes[app_name] > RESET_THRESHOLD:
-                    logging.info(f"Detected abrupt reset for {app_name} to {current_volume * 100:.0f}% Setting volume back to {safe_volumes[app_name] * 100:.1f}%.")
-                    session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
-                    if session:
+                    if app_name not in reset_attempts:
+                        reset_attempts[app_name] = 0
+                    reset_attempts[app_name] += 1
+
+                    if reset_attempts[app_name] == 3:
+                        logging.warning(f"{app_name} is persistently resetting volume! Forcing override.")
+                        time.sleep(0.2)
                         session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
+                    elif reset_attempts[app_name] > 3:
+                        force_mute(app_name, session)
+                    else:
+                        logging.info(f"Detected abrupt reset for {app_name} to {current_volume * 100:.0f}% Setting volume back to {safe_volumes[app_name] * 100:.1f}%. (attempt {reset_attempts[app_name]}/3)")
+                        session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
+                        if session:
+                            threading.Timer(0.1, lambda: None).start()
+                            session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(safe_volumes[app_name], None)
                         
                 else:
                     logging.info(
@@ -92,11 +108,28 @@ def monitor_and_set_volumes():
         if volumes_changed:
             save_safe_volumes(safe_volumes)
 
-        # Check every second
-        time.sleep(1)
+        time.sleep(0.2)
 
-def create_image():
-    return Image.open("F:/progg/resources/animal.png")
+
+def force_mute(app_name, session):
+    logging.warning(f"{app_name} is persistently resetting volume! Muting application.")
+    time.sleep(0.2)
+    session[0]._ctl.QueryInterface(ISimpleAudioVolume).SetMute(True, None)
+    
+    muted_apps.add(app_name)
+    update_icon()
+
+    toaster.show_toast("Volume Monitor", f"{app_name} was forcefully muted.", duration=5, threaded=True)
+
+
+def create_image(muted=False):
+    base_image = Image.open("F:/progg/resources/animal.png").convert("RGBA")
+
+    if muted:
+        overlay = Image.new("RGBA", base_image.size, (255, 0, 0, 128))
+        return Image.alpha_composite(base_image, overlay)
+    
+    return base_image
 
 def on_quit(icon, item):
     icon.stop()
@@ -107,9 +140,17 @@ def on_quit(icon, item):
         pass  # Ignore the SystemExit exception to prevent it from causing issues
 
 def run_tray_icon():
+    global icon
     menu = Menu(MenuItem("Quit", on_quit))
     icon = Icon("Volume Monitor", create_image(), "Volume Monitor Running", menu)
     icon.run()
+
+def update_icon():
+    icon.icon = create_image(muted=bool(muted_apps))
+    if muted_apps:
+        icon.title = f"Muted: {', '.join(muted_apps)}"
+    else:
+        icon.title = "Volume Monitor Running"
 
 if __name__ == "__main__":
     try:
