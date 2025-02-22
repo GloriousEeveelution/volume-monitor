@@ -3,6 +3,7 @@ import time
 import json
 import os
 import logging
+import psutil
 from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 from pystray import Icon, MenuItem, Menu
 from PIL import Image
@@ -69,7 +70,13 @@ def monitor_and_set_volumes():
 
         for app_name, volume_ctl in app_volumes.items():
             current_volume = volume_ctl.GetMasterVolume()
-            session = [s for s in AudioUtilities.GetAllSessions() if s.Process and s.Process.name() == app_name]
+            session = []
+            for s in AudioUtilities.GetAllSessions():
+                try:
+                    if s.Process and s.Process.name() == app_name:
+                        session.append(s)
+                except psutil.NoSuchProcess:
+                    logging.warning(f"Skipped vanished process: {app_name}")
 
             if app_name not in safe_volumes:
                 safe_volumes[app_name] = min(current_volume, DEFAULT_THRESHOLD)
